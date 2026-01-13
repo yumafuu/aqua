@@ -35,7 +35,19 @@ func New(fs afero.Fs, param *config.Param) *ConfigReader {
 const homePrefix = "$HOME" + string(os.PathSeparator)
 
 func (r *ConfigReader) Read(logger *slog.Logger, configFilePath string, cfg *aqua.Config) error {
+	return r.readWithImportChain(logger, configFilePath, cfg, nil)
+}
+
+func (r *ConfigReader) readWithImportChain(logger *slog.Logger, configFilePath string, cfg *aqua.Config, importChain []string) error {
 	logger = logger.With("config_file_path", configFilePath)
+
+	// Check for circular import
+	var err error
+	importChain, err = appendToImportChain(importChain, configFilePath)
+	if err != nil {
+		return err
+	}
+
 	file, err := r.fs.Open(configFilePath)
 	if err != nil {
 		return fmt.Errorf("open a file: %w", err)
@@ -48,8 +60,7 @@ func (r *ConfigReader) Read(logger *slog.Logger, configFilePath string, cfg *aqu
 	if err := r.readRegistries(configFileDir, cfg); err != nil {
 		return err
 	}
-	r.readPackages(logger, configFilePath, cfg)
-	return nil
+	return r.readPackagesWithImportChain(logger, configFilePath, cfg, importChain)
 }
 
 func (r *ConfigReader) readRegistries(configFileDir string, cfg *aqua.Config) error {
@@ -67,14 +78,17 @@ func (r *ConfigReader) readRegistries(configFileDir string, cfg *aqua.Config) er
 	return nil
 }
 
-func (r *ConfigReader) readPackages(logger *slog.Logger, configFilePath string, cfg *aqua.Config) {
+func (r *ConfigReader) readPackagesWithImportChain(logger *slog.Logger, configFilePath string, cfg *aqua.Config, importChain []string) error {
 	pkgs := []*aqua.Package{}
 	for _, pkg := range cfg.Packages {
 		if pkg == nil {
 			continue
 		}
-		subPkgs, err := r.readPackage(logger, configFilePath, pkg)
+		subPkgs, err := r.readPackageWithImportChain(logger, configFilePath, pkg, importChain)
 		if err != nil {
+			if errors.Is(err, errCircularImport) {
+				return err
+			}
 			slogerr.WithError(logger, err).Error("read a package")
 			continue
 		}
@@ -87,26 +101,37 @@ func (r *ConfigReader) readPackages(logger *slog.Logger, configFilePath string, 
 	}
 	cfg.Packages = pkgs
 	if cfg.ImportDir != "" {
-		cfg.Packages = append(cfg.Packages, r.readImportDir(logger, configFilePath, cfg)...)
+		importPkgs, err := r.readImportDirWithImportChain(logger, configFilePath, cfg, importChain)
+		if err != nil {
+			return err
+		}
+		cfg.Packages = append(cfg.Packages, importPkgs...)
 	}
+	return nil
 }
 
-func (r *ConfigReader) readImportDir(logger *slog.Logger, configFilePath string, cfg *aqua.Config) []*aqua.Package {
+func (r *ConfigReader) readImportDirWithImportChain(logger *slog.Logger, configFilePath string, cfg *aqua.Config, importChain []string) ([]*aqua.Package, error) {
 	if cfg.ImportDir == "" {
-		return nil
+		return nil, nil
 	}
-	pkgs1, err := r.importFiles(logger, configFilePath, filepath.Join(cfg.ImportDir, "*.yml"))
+	pkgs1, err := r.importFilesWithImportChain(logger, configFilePath, filepath.Join(cfg.ImportDir, "*.yml"), importChain)
 	if err != nil {
+		if errors.Is(err, errCircularImport) {
+			return nil, err
+		}
 		slogerr.WithError(logger, err).Error("read import files")
 	}
-	pkgs2, err := r.importFiles(logger, configFilePath, filepath.Join(cfg.ImportDir, "*.yaml"))
+	pkgs2, err := r.importFilesWithImportChain(logger, configFilePath, filepath.Join(cfg.ImportDir, "*.yaml"), importChain)
 	if err != nil {
+		if errors.Is(err, errCircularImport) {
+			return nil, err
+		}
 		slogerr.WithError(logger, err).Error("read import files")
 	}
-	return append(pkgs1, pkgs2...)
+	return append(pkgs1, pkgs2...), nil
 }
 
-func (r *ConfigReader) readPackage(logger *slog.Logger, configFilePath string, pkg *aqua.Package) ([]*aqua.Package, error) {
+func (r *ConfigReader) readPackageWithImportChain(logger *slog.Logger, configFilePath string, pkg *aqua.Package, importChain []string) ([]*aqua.Package, error) {
 	if pkg.GoVersionFile != "" {
 		// go_version_file
 		if err := readGoVersionFile(r.fs, configFilePath, pkg); err != nil {
@@ -134,10 +159,10 @@ func (r *ConfigReader) readPackage(logger *slog.Logger, configFilePath string, p
 	}
 	// import
 	logger = logger.With("import", pkg.Import)
-	return r.importFiles(logger, configFilePath, pkg.Import)
+	return r.importFilesWithImportChain(logger, configFilePath, pkg.Import, importChain)
 }
 
-func (r *ConfigReader) importFiles(logger *slog.Logger, configFilePath string, importGlob string) ([]*aqua.Package, error) {
+func (r *ConfigReader) importFilesWithImportChain(logger *slog.Logger, configFilePath string, importGlob string, importChain []string) ([]*aqua.Package, error) {
 	p := filepath.Join(filepath.Dir(configFilePath), importGlob)
 	filePaths, err := afero.Glob(r.fs, p)
 	if err != nil {
@@ -148,7 +173,10 @@ func (r *ConfigReader) importFiles(logger *slog.Logger, configFilePath string, i
 	for _, filePath := range filePaths {
 		logger := logger.With("imported_file", filePath)
 		subCfg := &aqua.Config{}
-		if err := r.Read(logger, filePath, subCfg); err != nil {
+		if err := r.readWithImportChain(logger, filePath, subCfg, importChain); err != nil {
+			if errors.Is(err, errCircularImport) {
+				return nil, err
+			}
 			slogerr.WithError(logger, err).Error("read an import file")
 			continue
 		}

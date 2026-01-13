@@ -2,6 +2,7 @@ package reader_test
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/aquaproj/aqua/v2/pkg/config"
@@ -17,6 +18,7 @@ func Test_configReader_Read(t *testing.T) { //nolint:funlen
 		name           string
 		exp            *aqua.Config
 		isErr          bool
+		errContains    []string // expected substrings in error message
 		files          map[string]string
 		configFilePath string
 		homeDir        string
@@ -98,6 +100,77 @@ packages:
 				},
 			},
 		},
+		{
+			name: "circular import - self reference",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> aqua.yaml"},
+		},
+		{
+			name: "circular import - A imports B, B imports A",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: b.yaml
+`,
+				"/home/workspace/foo/b.yaml": `packages:
+- import: aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> b.yaml -> aqua.yaml"},
+		},
+		{
+			name: "circular import - A imports B, B imports C, C imports A",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: b.yaml
+`,
+				"/home/workspace/foo/b.yaml": `packages:
+- import: c.yaml
+`,
+				"/home/workspace/foo/c.yaml": `packages:
+- import: aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> b.yaml -> c.yaml -> aqua.yaml"},
+		},
+		{
+			name: "circular import - glob pattern imports parent",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: imports/*.yaml
+`,
+				"/home/workspace/foo/imports/a.yaml": `packages:
+- name: foo/bar@v1.0.0
+`,
+				"/home/workspace/foo/imports/b.yaml": `packages:
+- import: ../aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> imports/b.yaml -> aqua.yaml"},
+		},
 	}
 	logger := slog.New(slog.DiscardHandler)
 	for _, d := range data {
@@ -111,8 +184,15 @@ packages:
 				HomeDir: d.homeDir,
 			})
 			cfg := &aqua.Config{}
-			if err := reader.Read(logger, d.configFilePath, cfg); err != nil {
+			err = reader.Read(logger, d.configFilePath, cfg)
+			if err != nil {
 				if d.isErr {
+					// Verify error message contains expected substrings
+					for _, substr := range d.errContains {
+						if !strings.Contains(err.Error(), substr) {
+							t.Errorf("error message should contain %q, got: %s", substr, err.Error())
+						}
+					}
 					return
 				}
 				t.Fatal(err)

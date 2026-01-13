@@ -1,6 +1,7 @@
 package reader_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aquaproj/aqua/v2/pkg/config"
@@ -17,6 +18,7 @@ func Test_configReader_ReadToUpdate(t *testing.T) { //nolint:funlen
 		cfg            *aqua.Config
 		cfgs           map[string]*aqua.Config
 		isErr          bool
+		errContains    []string // expected substrings in error message
 		files          map[string]string
 		configFilePath string
 		homeDir        string
@@ -113,6 +115,37 @@ packages:
 				},
 			},
 		},
+		{
+			name: "circular import - self reference",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> aqua.yaml"},
+		},
+		{
+			name: "circular import - A imports B, B imports A",
+			files: map[string]string{
+				"/home/workspace/foo/aqua.yaml": `registries:
+- type: standard
+  ref: v2.5.0
+packages:
+- import: b.yaml
+`,
+				"/home/workspace/foo/b.yaml": `packages:
+- import: aqua.yaml
+`,
+			},
+			configFilePath: "/home/workspace/foo/aqua.yaml",
+			isErr:          true,
+			errContains:    []string{"circular import detected", "aqua.yaml -> b.yaml -> aqua.yaml"},
+		},
 	}
 	for _, d := range data {
 		t.Run(d.name, func(t *testing.T) {
@@ -128,6 +161,12 @@ packages:
 			cfgs, err := reader.ReadToUpdate(d.configFilePath, cfg)
 			if err != nil {
 				if d.isErr {
+					// Verify error message contains expected substrings
+					for _, substr := range d.errContains {
+						if !strings.Contains(err.Error(), substr) {
+							t.Errorf("error message should contain %q, got: %s", substr, err.Error())
+						}
+					}
 					return
 				}
 				t.Fatal(err)

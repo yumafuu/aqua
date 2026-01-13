@@ -14,6 +14,17 @@ import (
 )
 
 func (r *ConfigReader) ReadToUpdate(configFilePath string, cfg *aqua.Config) (map[string]*aqua.Config, error) {
+	return r.readToUpdateWithImportChain(configFilePath, cfg, nil)
+}
+
+func (r *ConfigReader) readToUpdateWithImportChain(configFilePath string, cfg *aqua.Config, importChain []string) (map[string]*aqua.Config, error) {
+	// Check for circular import
+	var err error
+	importChain, err = appendToImportChain(importChain, configFilePath)
+	if err != nil {
+		return nil, err
+	}
+
 	file, err := r.fs.Open(configFilePath)
 	if err != nil {
 		return nil, err //nolint:wrapcheck
@@ -37,14 +48,14 @@ func (r *ConfigReader) ReadToUpdate(configFilePath string, cfg *aqua.Config) (ma
 			rgst.Path = osfile.Abs(configFileDir, rgst.Path)
 		}
 	}
-	cfgs, err := r.readImportsToUpdate(configFilePath, cfg)
+	cfgs, err := r.readImportsToUpdateWithImportChain(configFilePath, cfg, importChain)
 	if err != nil {
 		return nil, fmt.Errorf("read imports (%s): %w", configFilePath, err)
 	}
 	return cfgs, nil
 }
 
-func (r *ConfigReader) readImportsToUpdate(configFilePath string, cfg *aqua.Config) (map[string]*aqua.Config, error) { //nolint:cyclop
+func (r *ConfigReader) readImportsToUpdateWithImportChain(configFilePath string, cfg *aqua.Config, importChain []string) (map[string]*aqua.Config, error) { //nolint:cyclop
 	cfgs := map[string]*aqua.Config{}
 	pkgs := []*aqua.Package{}
 	for _, pkg := range cfg.Packages {
@@ -59,15 +70,15 @@ func (r *ConfigReader) readImportsToUpdate(configFilePath string, cfg *aqua.Conf
 			pkgs = append(pkgs, pkg)
 			continue
 		}
-		if err := r.readImportToUpdate(configFilePath, pkg.Import, cfg, cfgs); err != nil {
+		if err := r.readImportToUpdateWithImportChain(configFilePath, pkg.Import, cfg, cfgs, importChain); err != nil {
 			return nil, err
 		}
 	}
 	if cfg.ImportDir != "" {
-		if err := r.readImportToUpdate(configFilePath, filepath.Join(cfg.ImportDir, "*.yml"), cfg, cfgs); err != nil {
+		if err := r.readImportToUpdateWithImportChain(configFilePath, filepath.Join(cfg.ImportDir, "*.yml"), cfg, cfgs, importChain); err != nil {
 			return nil, err
 		}
-		if err := r.readImportToUpdate(configFilePath, filepath.Join(cfg.ImportDir, "*.yaml"), cfg, cfgs); err != nil {
+		if err := r.readImportToUpdateWithImportChain(configFilePath, filepath.Join(cfg.ImportDir, "*.yaml"), cfg, cfgs, importChain); err != nil {
 			return nil, err
 		}
 	}
@@ -75,7 +86,7 @@ func (r *ConfigReader) readImportsToUpdate(configFilePath string, cfg *aqua.Conf
 	return cfgs, nil
 }
 
-func (r *ConfigReader) readImportToUpdate(configFilePath, importPath string, cfg *aqua.Config, cfgs map[string]*aqua.Config) error {
+func (r *ConfigReader) readImportToUpdateWithImportChain(configFilePath, importPath string, cfg *aqua.Config, cfgs map[string]*aqua.Config, importChain []string) error {
 	p := filepath.Join(filepath.Dir(configFilePath), importPath)
 	filePaths, err := afero.Glob(r.fs, p)
 	if err != nil {
@@ -84,7 +95,7 @@ func (r *ConfigReader) readImportToUpdate(configFilePath, importPath string, cfg
 	sort.Strings(filePaths)
 	for _, filePath := range filePaths {
 		subCfg := &aqua.Config{}
-		subCfgs, err := r.ReadToUpdate(filePath, subCfg)
+		subCfgs, err := r.readToUpdateWithImportChain(filePath, subCfg, importChain)
 		if err != nil {
 			return err
 		}
